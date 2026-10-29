@@ -621,29 +621,27 @@ namespace AdsMini
 
         public List<SymbolInfo> Search(string query, bool includeMembers)
         {
-            string q = (query ?? "").Trim();
+            // Every word must match the name or the type. A word with * or ? is a wildcard
+            // pattern for the whole name or type (e.g. MAIN.* or ARRAY*); other words match anywhere.
+            string[] terms = (query ?? "").Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            Regex[] rx = new Regex[terms.Length];
+            for (int i = 0; i < terms.Length; i++)
+            {
+                if (terms[i].IndexOf('*') >= 0 || terms[i].IndexOf('?') >= 0)
+                    rx[i] = new Regex("^" + Regex.Escape(terms[i]).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", RegexOptions.IgnoreCase);
+            }
             List<SymbolInfo> r = new List<SymbolInfo>();
-            Regex rx = null;
-            string[] terms = null;
-            if (q.IndexOf('*') >= 0 || q.IndexOf('?') >= 0)
-                rx = new Regex("^" + Regex.Escape(q).Replace(@"\*", ".*").Replace(@"\?", ".") + "$", RegexOptions.IgnoreCase);
-            else
-                terms = q.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (SymbolInfo s in Symbols)
             {
                 if (!includeMembers && s.IsMember) continue;
-                if (rx != null)
+                bool ok = true;
+                for (int i = 0; i < terms.Length && ok; i++)
                 {
-                    if (!rx.IsMatch(s.Name)) continue;
+                    if (rx[i] != null) ok = rx[i].IsMatch(s.Name) || rx[i].IsMatch(s.Type);
+                    else ok = s.Name.IndexOf(terms[i], StringComparison.OrdinalIgnoreCase) >= 0
+                           || s.Type.IndexOf(terms[i], StringComparison.OrdinalIgnoreCase) >= 0;
                 }
-                else
-                {
-                    bool ok = true;
-                    foreach (string t in terms)
-                        if (s.Name.IndexOf(t, StringComparison.OrdinalIgnoreCase) < 0) { ok = false; break; }
-                    if (!ok) continue;
-                }
-                r.Add(s);
+                if (ok) r.Add(s);
             }
             return r;
         }
@@ -1824,7 +1822,11 @@ function Start-Gui {
     function Update-Search {
         $lvSym.SelectedIndices.Clear()
         $S.Results = $S.Client.Search($tbSearch.Text, $cbMembers.Checked)
+        # Going to 0 first and scrolling back to the top stops a virtual list keeping its old
+        # scroll position, which showed as blank rows above the first symbol.
+        $lvSym.VirtualListSize = 0
         $lvSym.VirtualListSize = $S.Results.Count
+        if ($S.Results.Count -gt 0) { $lvSym.EnsureVisible(0) }
         $lvSym.Invalidate()
         $lblCount.Text = '{0:N0} of {1:N0}' -f $S.Results.Count, $S.Client.Symbols.Count
         Fit-Column $lvSym 0
@@ -1953,6 +1955,10 @@ function Start-Gui {
 
     # Re-read the routes each time the list opens, so ones added meanwhile show up.
     $cbNet.add_DropDown({ [void](Update-RouteList) })
+    # Picking a target from the list connects straight away (typing still needs Connect / Enter).
+    $cbNet.add_SelectionChangeCommitted({
+        $form.BeginInvoke([System.Windows.Forms.MethodInvoker] { $btnConnect.PerformClick() }) | Out-Null
+    })
     $cbNet.add_KeyDown({
         param($sender, $e)
         if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; $btnConnect.PerformClick() }
