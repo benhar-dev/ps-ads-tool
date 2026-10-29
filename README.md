@@ -22,5 +22,24 @@ Use of this information, code, or scripts provided is at your own risk. Readers 
 
 
 
-TBA
+A single PowerShell script for searching, reading, writing and charting TwinCAT PLC variables on a PC that only has the TwinCAT ADS runtime installed. No XAE, Python or extra DLLs: it calls `TcAdsDll.dll` directly.
+
+**Features**
+
+- Pick a target from the ADS routes already on the PC (TC3 `StaticRoutes.xml` / TC2 registry), or type a Net ID.
+- Search the uploaded symbols, including struct / FB members and small arrays.
+- Read and write by name, with IEC value formats (`TRUE`, `16#FF`, `T#1s500ms`, `DT#...`, enum names, `hex:` for raw bytes).
+- Watch list with live update, plus a 10 s live chart of the selected variable.
+- Dark and light themes (follows the Windows setting by default).
+
+**Usage**
+
+Copy `AdsTool.ps1`, `AdsTool.bat` and `AdsTool-Console.bat` into one folder on the target PC.
+
+- `AdsTool.bat`: GUI.
+- `AdsTool-Console.bat`: console mode (`find`, `read`, `write`, `watch`, `routes`, ...).
+
+Optional arguments (passed through by both .bat files): `-NetId <Net ID or route name>`, `-Port 851` (TC2: 801), `-Theme Auto|Dark|Light`, `-AdsDll <path to TcAdsDll.dll>`, `-TimeoutMs`, `-MaxDepth`, `-MaxArray`.
+
+Remote targets need an ADS route on the PC first.
 

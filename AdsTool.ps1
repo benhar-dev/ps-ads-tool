@@ -1504,11 +1504,13 @@ function Start-Gui {
         if ($dark) {
             return @{ Back = (C '#1F1F1F'); Input = (C '#2A2A2A'); Header = (C '#2D2D2D'); Button = (C '#333333'); Hover = (C '#3E3E3E')
                       Border = (C '#454545'); Text = (C '#E4E4E4'); Dim = (C '#9D9D9D'); Grid = (C '#3A3A3A'); Accent = (C '#4CA6FF')
+                      Select = (C '#264F78'); SelectText = (C '#FFFFFF')
                       Comment = (C '#7FB96A'); Error = (C '#F28B82') }
         }
         return @{ Back = [System.Drawing.SystemColors]::Control; Input = [System.Drawing.SystemColors]::Window; Header = (C '#F3F3F3')
                   Button = [System.Drawing.SystemColors]::Control; Hover = (C '#E5F1FB'); Border = (C '#C8C8C8')
                   Text = [System.Drawing.SystemColors]::ControlText; Dim = (C '#6E6E6E'); Grid = (C '#E3E3E3'); Accent = (C '#0067C0')
+                  Select = [System.Drawing.SystemColors]::Highlight; SelectText = [System.Drawing.SystemColors]::HighlightText
                   Comment = (C '#2E7D32'); Error = (C '#B3261E') }
     }
     $S.Pal = Get-Palette $startDark
@@ -1593,8 +1595,28 @@ function Start-Gui {
             [System.Windows.Forms.TextRenderer]::DrawText($g, $e.Header.Text, $sender.Font, $r, $P.Dim,
                 [System.Windows.Forms.TextFormatFlags]'VerticalCenter, Left, EndEllipsis, SingleLine')
         })
-        $lv.add_DrawItem({ param($sender, $e) $e.DrawDefault = $true })
-        $lv.add_DrawSubItem({ param($sender, $e) $e.DrawDefault = $true })
+        # Rows are drawn here (not by Windows) so selected text follows the theme.
+        $lv.add_DrawItem({ param($sender, $e) })   # cells are drawn in DrawSubItem
+        $lv.add_DrawSubItem({
+            param($sender, $e)
+            $P = $S.Pal
+            $sel = $sender.SelectedIndices.Contains($e.ItemIndex)
+            if ($sel) { $bg = $P.Select; $fg = $P.SelectText } else { $bg = $sender.BackColor; $fg = $e.Item.ForeColor }
+            $b = $e.Bounds
+            if ($e.ColumnIndex -eq 0) { $b = New-Object System.Drawing.Rectangle($b.X, $b.Y, $sender.Columns[0].Width, $b.Height) }
+            $br = New-Object System.Drawing.SolidBrush($bg)
+            $e.Graphics.FillRectangle($br, $b)
+            $br.Dispose()
+            $r = New-Object System.Drawing.Rectangle(($b.X + 4), $b.Y, ($b.Width - 6), $b.Height)
+            [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $e.SubItem.Text, $sender.Font, $r, $fg,
+                [System.Windows.Forms.TextFormatFlags]'VerticalCenter, Left, EndEllipsis, SingleLine, NoPrefix')
+        })
+        # Owner-drawn list views only repaint part of a row on hover; repaint the whole row.
+        $lv.add_MouseMove({
+            param($sender, $e)
+            $it = $sender.GetItemAt($e.X, $e.Y)
+            if ($it) { $sender.Invalidate($it.Bounds) }
+        })
         return $lv
     }
     # Stretch one column so the columns exactly fill the width (no unthemed strip on the right).
