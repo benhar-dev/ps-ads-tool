@@ -2234,7 +2234,9 @@ function Start-Gui {
         foreach ($k in $p.Keys) {
             $b = New-Object System.Windows.Media.SolidColorBrush (Get-Color $p[$k])
             $b.Freeze()
-            $window.Resources[$k] = $b
+            # set_Item, not [$k] = : PowerShell's indexer stores a PSObject wrapper
+            # round the brush, which WPF rejects when a DynamicResource wants a Brush.
+            $window.Resources.set_Item($k, $b)
         }
         $spark.SetColors((Get-Color $p.Accent), (Get-Color $p.Border), (Get-Color $p.Dim), (Get-Color $p.TipBg), (Get-Color $p.TipFg))
         if ($dark) { $themeIcon.Text = [string][char]0xE706 } else { $themeIcon.Text = [string][char]0xE708 }   # sun / moon
