@@ -119,8 +119,14 @@ namespace AdsMini
 
     public class SymbolInfo
     {
-        public string Name = "", Type = "", Comment = "";
-        public uint IGroup, IOffset, Size, DataType, Flags, Handle;
+        // Name / Type / Comment / Size are properties (not fields) so WPF lists can bind to them.
+        string name = "", type = "", comment = "";
+        uint size;
+        public string Name { get { return name; } set { name = value ?? ""; } }
+        public string Type { get { return type; } set { type = value ?? ""; } }
+        public string Comment { get { return comment; } set { comment = value ?? ""; } }
+        public uint Size { get { return size; } set { size = value; } }
+        public uint IGroup, IOffset, DataType, Flags, Handle;
         public bool IsMember;
         public SymbolInfo Clone() { return (SymbolInfo)MemberwiseClone(); }
         public string Address
@@ -134,6 +140,24 @@ namespace AdsMini
     }
 
     public class ArrDim { public int LBound; public uint Elements; }
+
+    // A row in the watch list; raises change notifications so the WPF list updates in place.
+    public class WatchItem : System.ComponentModel.INotifyPropertyChanged
+    {
+        string name = "", val = "", type = "";
+        bool isError;
+        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+        public WatchItem(string name) { this.name = name ?? ""; }
+        void Raise(string p)
+        {
+            System.ComponentModel.PropertyChangedEventHandler h = PropertyChanged;
+            if (h != null) h(this, new System.ComponentModel.PropertyChangedEventArgs(p));
+        }
+        public string Name { get { return name; } }
+        public string Value { get { return val; } set { if (val != value) { val = value ?? ""; Raise("Value"); } } }
+        public string Type { get { return type; } set { if (type != value) { type = value ?? ""; Raise("Type"); } } }
+        public bool IsError { get { return isError; } set { if (isError != value) { isError = value; Raise("IsError"); } } }
+    }
 
     public class TypeInfo
     {
@@ -1319,24 +1343,23 @@ function Start-Cli {
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
-# GUI-only helpers: the 10 s chart (drawn with GDI+) and the Windows calls for
-# the dark title bar / dark scrollbars. Only needs System.Drawing, which is part of Windows.
+# GUI-only C#: the 10 s chart (a WPF element drawn in OnRender) and the dark title bar call.
+# Uses only WPF, which is part of Windows / .NET Framework.
 $uiSource = @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
 
 namespace AdsMini
 {
     public static class Win
     {
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr hwnd, string appName, string idList);
-        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
         public static void DarkTitleBar(IntPtr hwnd, bool dark)
         {
@@ -1345,30 +1368,69 @@ namespace AdsMini
             {
                 // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Windows 10 20H1+ / 11), 19 on older Windows 10 builds
                 if (DwmSetWindowAttribute(hwnd, 20, ref v, 4) != 0) DwmSetWindowAttribute(hwnd, 19, ref v, 4);
-                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, 0x0027); // NOMOVE|NOSIZE|NOZORDER|FRAMECHANGED
             }
             catch { }
         }
-
-        public static void Theme(IntPtr hwnd, string name)
-        {
-            try { SetWindowTheme(hwnd, string.IsNullOrEmpty(name) ? null : name, null); } catch { }
-        }
     }
 
-    public class Spark
+    public class SparkView : FrameworkElement
     {
         public double WindowMs = 10000;
         public bool IsBool;
         public bool Running;
+        public string EmptyText = "";
         readonly List<double> ts = new List<double>();
         readonly List<double> vs = new List<double>();
         readonly Stopwatch sw = Stopwatch.StartNew();
         static readonly CultureInfo IC = CultureInfo.InvariantCulture;
+        readonly Typeface face = new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+        Brush lineBrush, textBrush, fillBrush, tipBack, tipText;
+        Pen linePen, gridPen, cursorPen;
+        double mouseX = -1;
+
+        public SparkView()
+        {
+            ClipToBounds = true;
+            SetColors(Colors.DodgerBlue, Colors.Gray, Colors.Gray, Colors.Black, Colors.White);
+            MouseMove += delegate(object s, MouseEventArgs e) { mouseX = e.GetPosition(this).X; InvalidateVisual(); };
+            MouseLeave += delegate(object s, MouseEventArgs e) { mouseX = -1; InvalidateVisual(); };
+        }
+
+        static Brush Solid(Color c)
+        {
+            SolidColorBrush b = new SolidColorBrush(c);
+            b.Freeze();
+            return b;
+        }
+
+        public void SetColors(Color line, Color grid, Color text, Color tipBg, Color tipFg)
+        {
+            lineBrush = Solid(line);
+            textBrush = Solid(text);
+            tipBack = Solid(tipBg);
+            tipText = Solid(tipFg);
+            LinearGradientBrush fill = new LinearGradientBrush(Color.FromArgb(0x60, line.R, line.G, line.B), Color.FromArgb(0x00, line.R, line.G, line.B), 90.0);
+            fill.Freeze();
+            fillBrush = fill;
+            linePen = new Pen(lineBrush, 2.0);
+            linePen.LineJoin = PenLineJoin.Round;
+            linePen.Freeze();
+            gridPen = new Pen(Solid(grid), 1.0);
+            gridPen.DashStyle = new DashStyle(new double[] { 2, 3 }, 0);
+            gridPen.Freeze();
+            cursorPen = new Pen(textBrush, 1.0);
+            cursorPen.Freeze();
+            InvalidateVisual();
+        }
 
         public int Count { get { return vs.Count; } }
 
-        public void Clear() { ts.Clear(); vs.Clear(); }
+        public void Clear()
+        {
+            ts.Clear();
+            vs.Clear();
+            InvalidateVisual();
+        }
 
         public void Add(double v)
         {
@@ -1378,7 +1440,10 @@ namespace AdsMini
             int drop = 0; // keep one point just before the window so the line enters from the left edge
             while (drop + 1 < ts.Count && ts[drop + 1] <= now - WindowMs) drop++;
             if (drop > 0) { ts.RemoveRange(0, drop); vs.RemoveRange(0, drop); }
+            InvalidateVisual();
         }
+
+        public void Refresh() { InvalidateVisual(); }
 
         static string Num(double v)
         {
@@ -1387,91 +1452,731 @@ namespace AdsMini
             return Math.Round(v, 3).ToString(IC);
         }
 
-        public void Paint(Graphics g, int w, int h, Font font, Color back, Color grid, Color line, Color text, string emptyText)
+        FormattedText Text(string s, double size, Brush b)
         {
-            g.Clear(back);
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Brush tb = new SolidBrush(text))
-            using (Pen gp = new Pen(grid))
+#pragma warning disable 618
+            return new FormattedText(s, IC, FlowDirection.LeftToRight, face, size, b);
+#pragma warning restore 618
+        }
+
+        protected override void OnRender(DrawingContext dc)
+        {
+            double w = ActualWidth, h = ActualHeight;
+            dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, w, h)); // makes the whole area hoverable
+            if (w < 60 || h < 40) return;
+            if (vs.Count == 0)
             {
-                if (vs.Count == 0)
-                {
-                    StringFormat sf = new StringFormat();
-                    sf.Alignment = StringAlignment.Center;
-                    sf.LineAlignment = StringAlignment.Center;
-                    g.DrawString(emptyText, font, tb, new RectangleF(0, 0, w, h), sf);
-                    return;
-                }
-                double now = Running ? sw.Elapsed.TotalMilliseconds : ts[ts.Count - 1];
-                double t0 = now - WindowMs;
-                double mn = double.MaxValue, mx = double.MinValue;
-                foreach (double v in vs) { if (v < mn) mn = v; if (v > mx) mx = v; }
-                if (IsBool) { mn = 0; mx = 1; }
-                else if (mx - mn < 1e-12)
-                {
-                    double pad = Math.Abs(mx) > 0 ? Math.Abs(mx) * 0.1 : 1;
-                    mn -= pad; mx += pad;
-                }
-                string sMax = IsBool ? "TRUE" : Num(mx);
-                string sMin = IsBool ? "FALSE" : Num(mn);
-                if (!IsBool) { double pad = (mx - mn) * 0.08; mn -= pad; mx += pad; }
+                FormattedText e = Text(EmptyText, 12, textBrush);
+                dc.DrawText(e, new Point(Math.Max(0, (w - e.Width) / 2), (h - e.Height) / 2));
+                return;
+            }
 
-                float fh = font.GetHeight(g);
-                float lw = Math.Max(g.MeasureString(sMax, font).Width, g.MeasureString(sMin, font).Width);
-                float L = lw + 8, R = 10, T = fh / 2 + 4, B = fh + 6;
-                float pw = w - L - R, ph = h - T - B;
-                if (pw < 20 || ph < 10) return;
+            double now = Running ? sw.Elapsed.TotalMilliseconds : ts[ts.Count - 1];
+            double t0 = now - WindowMs;
+            double mn = double.MaxValue, mx = double.MinValue;
+            foreach (double v in vs) { if (v < mn) mn = v; if (v > mx) mx = v; }
+            string sMax, sMin;
+            if (IsBool)
+            {
+                mn = -0.15; mx = 1.15;
+                sMax = "TRUE"; sMin = "FALSE";
+            }
+            else
+            {
+                if (mx - mn < 1e-12) { double pad = Math.Abs(mx) > 0 ? Math.Abs(mx) * 0.1 : 1; mn -= pad; mx += pad; }
+                double p2 = (mx - mn) * 0.12;
+                mn -= p2; mx += p2;
+                sMax = Num(mx); sMin = Num(mn);
+            }
 
-                for (int i = 0; i <= 2; i++) { float y = T + ph * i / 2f; g.DrawLine(gp, L, y, L + pw, y); }
-                for (int s = 0; s <= 10; s += 2)
-                {
-                    float x = L + pw * s / 10f;
-                    g.DrawLine(gp, x, T, x, T + ph);
-                    string lab = s == 10 ? "now" : "-" + (10 - s) + "s";
-                    SizeF sz = g.MeasureString(lab, font);
-                    g.DrawString(lab, font, tb, Math.Max(0, Math.Min(x - sz.Width / 2, w - sz.Width)), T + ph + 2);
-                }
-                // value labels sit on the padded range's 8% lines, i.e. the real min / max
-                float yMax = T + ph * 0.08f / 1.16f, yMin = T + ph - ph * 0.08f / 1.16f;
-                if (IsBool) { yMax = T; yMin = T + ph; }
-                g.DrawString(sMax, font, tb, L - 4 - g.MeasureString(sMax, font).Width, yMax - fh / 2);
-                g.DrawString(sMin, font, tb, L - 4 - g.MeasureString(sMin, font).Width, yMin - fh / 2);
+            FormattedText fMax = Text(sMax, 11, textBrush), fMin = Text(sMin, 11, textBrush);
+            double L = Math.Max(fMax.Width, fMin.Width) + 16, R = 12, T = 10, B = 26;
+            double pw = w - L - R, ph = h - T - B;
+            if (pw < 20 || ph < 10) return;
 
-                List<PointF> pts = new List<PointF>();
-                for (int i = 0; i < vs.Count; i++)
-                {
-                    float x = (float)(L + (ts[i] - t0) / WindowMs * pw);
-                    if (x < L) x = L;
-                    float y = (float)(T + ph - (vs[i] - mn) / (mx - mn) * ph);
-                    if (IsBool && pts.Count > 0) pts.Add(new PointF(x, pts[pts.Count - 1].Y)); // step
-                    pts.Add(new PointF(x, y));
-                }
-                if (Running) pts.Add(new PointF(L + pw, pts[pts.Count - 1].Y)); // hold last value up to "now"
+            double yTop = IsBool ? T + ph - (1 - mn) / (mx - mn) * ph : T;
+            double yBot = IsBool ? T + ph - (0 - mn) / (mx - mn) * ph : T + ph;
+            dc.DrawLine(gridPen, new Point(L, Math.Round(yTop) + 0.5), new Point(L + pw, Math.Round(yTop) + 0.5));
+            dc.DrawLine(gridPen, new Point(L, Math.Round((yTop + yBot) / 2) + 0.5), new Point(L + pw, Math.Round((yTop + yBot) / 2) + 0.5));
+            dc.DrawLine(gridPen, new Point(L, Math.Round(yBot) + 0.5), new Point(L + pw, Math.Round(yBot) + 0.5));
+            for (int s = 0; s <= 10; s += 2)
+            {
+                double x = Math.Round(L + pw * s / 10.0) + 0.5;
+                if (s > 0 && s < 10) dc.DrawLine(gridPen, new Point(x, T), new Point(x, T + ph));
+                FormattedText ft = Text(s == 10 ? "now" : "-" + (10 - s) + "s", 11, textBrush);
+                dc.DrawText(ft, new Point(Math.Max(0, Math.Min(x - ft.Width / 2, w - ft.Width)), T + ph + 7));
+            }
+            dc.DrawText(fMax, new Point(L - 8 - fMax.Width, yTop - fMax.Height / 2));
+            dc.DrawText(fMin, new Point(L - 8 - fMin.Width, yBot - fMin.Height / 2));
 
-                g.SetClip(new RectangleF(L, T - 3, pw + 4, ph + 6));
-                using (Pen lp = new Pen(line, 2f))
+            List<Point> pts = new List<Point>(vs.Count * 2 + 2);
+            for (int i = 0; i < vs.Count; i++)
+            {
+                double x = L + (ts[i] - t0) / WindowMs * pw;
+                if (x < L) x = L;
+                double y = T + ph - (vs[i] - mn) / (mx - mn) * ph;
+                if (IsBool && pts.Count > 0) pts.Add(new Point(x, pts[pts.Count - 1].Y)); // step
+                pts.Add(new Point(x, y));
+            }
+            if (Running) pts.Add(new Point(L + pw, pts[pts.Count - 1].Y)); // hold the last value up to "now"
+
+            dc.PushClip(new RectangleGeometry(new Rect(L, T - 4, pw + 4, ph + 8)));
+            if (pts.Count > 1)
+            {
+                StreamGeometry fill = new StreamGeometry();
+                using (StreamGeometryContext g = fill.Open())
                 {
-                    lp.LineJoin = LineJoin.Round;
-                    if (pts.Count > 1) g.DrawLines(lp, pts.ToArray());
+                    g.BeginFigure(new Point(pts[0].X, yBot), true, true);
+                    g.PolyLineTo(pts, false, false);
+                    g.LineTo(new Point(pts[pts.Count - 1].X, yBot), false, false);
                 }
-                PointF last = pts[pts.Count - 1];
-                using (Brush lb = new SolidBrush(line)) g.FillEllipse(lb, last.X - 3, last.Y - 3, 6, 6);
-                g.ResetClip();
+                fill.Freeze();
+                dc.DrawGeometry(fillBrush, null, fill);
+
+                StreamGeometry line = new StreamGeometry();
+                using (StreamGeometryContext g = line.Open())
+                {
+                    g.BeginFigure(pts[0], false, false);
+                    g.PolyLineTo(pts.GetRange(1, pts.Count - 1), true, true);
+                }
+                line.Freeze();
+                dc.DrawGeometry(null, linePen, line);
+            }
+            dc.DrawEllipse(lineBrush, null, pts[pts.Count - 1], 3.5, 3.5);
+            dc.Pop();
+
+            // Hover readout: value at the time under the mouse.
+            if (mouseX >= L && mouseX <= L + pw)
+            {
+                double tMouse = t0 + (mouseX - L) / pw * WindowMs;
+                int best = -1;
+                for (int i = 0; i < vs.Count; i++) { if (ts[i] <= tMouse) best = i; else break; }
+                if (best < 0) best = 0;
+                double y = T + ph - (vs[best] - mn) / (mx - mn) * ph;
+                dc.DrawLine(cursorPen, new Point(Math.Round(mouseX) + 0.5, T), new Point(Math.Round(mouseX) + 0.5, T + ph));
+                dc.DrawEllipse(tipBack, linePen, new Point(mouseX, y), 4, 4);
+                string label = (IsBool ? (vs[best] != 0 ? "TRUE" : "FALSE") : Num(vs[best])) + "    " + ((now - tMouse) / 1000.0).ToString("0.0", IC) + " s ago";
+                FormattedText ft = Text(label, 12, tipText);
+                double bw = ft.Width + 16, bh = ft.Height + 8;
+                double bx = mouseX + 12;
+                if (bx + bw > w) bx = mouseX - 12 - bw;
+                double by = Math.Max(2, Math.Min(y - bh - 10, h - bh - 2));
+                dc.DrawRoundedRectangle(tipBack, null, new Rect(bx, by, bw, bh), 6, 6);
+                dc.DrawText(ft, new Point(bx + 8, by + 4));
             }
         }
     }
 }
 '@
 
+$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Mini ADS Tool" Width="1300" Height="840" MinWidth="980" MinHeight="620"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource Bg}" Foreground="{DynamicResource Text}"
+        FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13"
+        UseLayoutRounding="True" SnapsToDevicePixels="True">
+  <Window.Resources>
+    <!-- Theme colours. These are replaced at runtime when switching dark / light. -->
+    <SolidColorBrush x:Key="Bg" Color="#16171B"/>
+    <SolidColorBrush x:Key="Surface" Color="#1F2026"/>
+    <SolidColorBrush x:Key="Surface2" Color="#2A2B33"/>
+    <SolidColorBrush x:Key="Hover" Color="#33343D"/>
+    <SolidColorBrush x:Key="Border" Color="#30313A"/>
+    <SolidColorBrush x:Key="Text" Color="#E7E8EC"/>
+    <SolidColorBrush x:Key="Dim" Color="#9A9CA8"/>
+    <SolidColorBrush x:Key="Accent" Color="#4F8CFF"/>
+    <SolidColorBrush x:Key="AccentText" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Select" Color="#2D4A80"/>
+    <SolidColorBrush x:Key="SelectText" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Error" Color="#FF7A7A"/>
+    <SolidColorBrush x:Key="Ok" Color="#4ADE80"/>
+    <SolidColorBrush x:Key="Warn" Color="#FBBF24"/>
+    <SolidColorBrush x:Key="Comment" Color="#86C48A"/>
+    <SolidColorBrush x:Key="Overlay" Color="#14FFFFFF"/>
+    <SolidColorBrush x:Key="TipBg" Color="#E7E8EC"/>
+    <SolidColorBrush x:Key="TipFg" Color="#16171B"/>
+
+    <!-- Text helpers -->
+    <Style x:Key="Icon" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="0,0,8,0"/>
+    </Style>
+    <Style x:Key="IconOnly" TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+      <Setter Property="Margin" Value="0"/>
+    </Style>
+    <Style x:Key="Caption" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Foreground" Value="{DynamicResource Dim}"/>
+    </Style>
+    <Style x:Key="Card" TargetType="Border">
+      <Setter Property="Background" Value="{DynamicResource Surface}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="14"/>
+    </Style>
+    <Style x:Key="Pill" TargetType="Border">
+      <Setter Property="Background" Value="{DynamicResource Surface2}"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="9,3"/>
+      <Setter Property="Margin" Value="0,0,6,6"/>
+    </Style>
+
+    <!-- Buttons: rounded, with a hover overlay so the same template works for normal and accent. -->
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Background" Value="{DynamicResource Surface2}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,6"/>
+      <Setter Property="MinHeight" Value="34"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid>
+              <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6"/>
+              <Border x:Name="ov" Background="{DynamicResource Overlay}" CornerRadius="6" Opacity="0"/>
+              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ov" Property="Opacity" Value="1"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Opacity" Value="0.8"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.4"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{DynamicResource Accent}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/>
+      <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <!-- Text boxes -->
+    <Style TargetType="TextBox">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Background" Value="{DynamicResource Surface2}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="8,0"/>
+      <Setter Property="MinHeight" Value="34"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="CaretBrush" Value="{DynamicResource Text}"/>
+      <Setter Property="SelectionBrush" Value="{DynamicResource Accent}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" Focusable="False"
+                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                            HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource Dim}"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Check boxes look like toggle switches -->
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal" Background="Transparent">
+              <Grid Width="36" Height="20" VerticalAlignment="Center">
+                <Border x:Name="track" CornerRadius="10" Background="{DynamicResource Surface2}"
+                        BorderBrush="{DynamicResource Dim}" BorderThickness="1"/>
+                <Ellipse x:Name="knob" Width="12" Height="12" Fill="{DynamicResource Dim}"
+                         HorizontalAlignment="Left" Margin="4,0,0,0"/>
+              </Grid>
+              <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="track" Property="Background" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="track" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="knob" Property="Fill" Value="{DynamicResource AccentText}"/>
+                <Setter TargetName="knob" Property="HorizontalAlignment" Value="Right"/>
+                <Setter TargetName="knob" Property="Margin" Value="0,0,4,0"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="track" Property="Opacity" Value="0.85"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Slim scroll bars -->
+    <Style x:Key="ThumbStyle" TargetType="Thumb">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border CornerRadius="4" Background="{DynamicResource Dim}" Opacity="0.45" Margin="2"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Width" Value="10"/>
+      <Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.Thumb>
+                  <Thumb Style="{StaticResource ThumbStyle}"/>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/>
+          <Setter Property="MinWidth" Value="0"/>
+          <Setter Property="Height" Value="10"/>
+          <Setter Property="MinHeight" Value="10"/>
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ScrollBar">
+                <Grid Background="Transparent">
+                  <Track x:Name="PART_Track" IsDirectionReversed="False">
+                    <Track.Thumb>
+                      <Thumb Style="{StaticResource ThumbStyle}"/>
+                    </Track.Thumb>
+                  </Track>
+                </Grid>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- List views -->
+    <Style TargetType="ListView">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/>
+      <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
+    </Style>
+    <Style TargetType="GridViewColumnHeader">
+      <Setter Property="Foreground" Value="{DynamicResource Dim}"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="GridViewColumnHeader">
+            <Grid>
+              <Border Background="{TemplateBinding Background}" BorderBrush="{DynamicResource Border}"
+                      BorderThickness="0,0,0,1" Padding="8,7">
+                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+              </Border>
+              <Thumb x:Name="PART_HeaderGripper" HorizontalAlignment="Right" Width="9" Margin="0,0,-4,0" Cursor="SizeWE">
+                <Thumb.Template>
+                  <ControlTemplate TargetType="Thumb">
+                    <Border Background="Transparent">
+                      <Rectangle Width="1" Margin="0,8" Fill="{DynamicResource Border}" HorizontalAlignment="Center"/>
+                    </Border>
+                  </ControlTemplate>
+                </Thumb.Template>
+              </Thumb>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ListViewItem">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListViewItem">
+            <Border x:Name="bd" Background="Transparent" CornerRadius="5" Padding="0,4" Margin="0,1">
+              <GridViewRowPresenter Columns="{TemplateBinding GridView.ColumnCollection}" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource Hover}"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource Select}"/>
+                <Setter Property="Foreground" Value="{DynamicResource SelectText}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="WatchItemStyle" TargetType="ListViewItem" BasedOn="{StaticResource {x:Type ListViewItem}}">
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding IsError}" Value="True">
+          <Setter Property="Foreground" Value="{DynamicResource Error}"/>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- Editable combo box (target picker) -->
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Padding" Value="10,7"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="bd" Background="Transparent" CornerRadius="5" Padding="{TemplateBinding Padding}" Margin="0,1">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource Hover}"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="{DynamicResource Select}"/>
+                <Setter Property="Foreground" Value="{DynamicResource SelectText}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="MinHeight" Value="34"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <ToggleButton x:Name="toggle" Focusable="False" ClickMode="Press"
+                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                <ToggleButton.Template>
+                  <ControlTemplate TargetType="ToggleButton">
+                    <Border x:Name="tb" Background="{DynamicResource Surface2}" BorderBrush="{DynamicResource Border}"
+                            BorderThickness="1" CornerRadius="6">
+                      <TextBlock Text="&#xE70D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10"
+                                 Foreground="{DynamicResource Dim}" HorizontalAlignment="Right"
+                                 VerticalAlignment="Center" Margin="0,0,11,0"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="tb" Property="BorderBrush" Value="{DynamicResource Dim}"/>
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </ToggleButton.Template>
+              </ToggleButton>
+              <ContentPresenter x:Name="content" IsHitTestVisible="False" Margin="10,0,30,0" VerticalAlignment="Center"
+                                Content="{TemplateBinding SelectionBoxItem}"
+                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
+              <TextBox x:Name="PART_EditableTextBox" Visibility="Hidden" Margin="1,1,28,1"
+                       Background="Transparent" BorderThickness="0"
+                       IsReadOnly="{TemplateBinding IsReadOnly}"/>
+              <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True" Focusable="False"
+                     PopupAnimation="Fade" IsOpen="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}">
+                <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}" BorderThickness="1"
+                        CornerRadius="8" Margin="0,4,0,0" Padding="4"
+                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                        MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                  <ScrollViewer>
+                    <ItemsPresenter/>
+                  </ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEditable" Value="True">
+                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="content" Property="Visibility" Value="Hidden"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="{DynamicResource Surface}"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- ===== Header ===== -->
+    <Border Grid.Row="0" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
+            BorderThickness="0,0,0,1" Padding="16,10">
+      <DockPanel LastChildFill="False">
+        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="34" Height="34" CornerRadius="9" Background="{DynamicResource Accent}" Margin="0,0,10,0">
+            <TextBlock Text="ADS" FontWeight="Bold" FontSize="11" Foreground="{DynamicResource AccentText}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <StackPanel VerticalAlignment="Center" Margin="0,0,22,0">
+            <TextBlock Text="Mini ADS Tool" FontWeight="SemiBold" FontSize="15"/>
+            <TextBlock Text="TwinCAT ADS test tool" Style="{StaticResource Caption}" FontWeight="Normal"/>
+          </StackPanel>
+          <ComboBox x:Name="cbNet" IsEditable="True" Width="340" MaxDropDownHeight="420" VerticalAlignment="Center"
+                    ToolTip="Pick a route (connects straight away) or type an AMS Net ID and press Enter"/>
+          <TextBlock Text="Port" Foreground="{DynamicResource Dim}" VerticalAlignment="Center" Margin="12,0,6,0"/>
+          <TextBox x:Name="tbPort" Width="64" ToolTip="TC3 PLC = 851, TC2 PLC = 801"/>
+          <Button x:Name="btnConnect" Style="{StaticResource AccentButton}" Margin="12,0,0,0">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Style="{StaticResource Icon}" Text="&#xE71B;"/>
+              <TextBlock Text="Connect" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Button>
+          <Button x:Name="btnDisconnect" Margin="8,0,0,0" IsEnabled="False">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Style="{StaticResource Icon}" Text="&#xE711;"/>
+              <TextBlock Text="Disconnect" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Button>
+          <Button x:Name="btnReload" Margin="8,0,0,0" Padding="10,6" IsEnabled="False" ToolTip="Reload symbols (after a PLC download)">
+            <TextBlock Style="{StaticResource IconOnly}" Text="&#xE72C;"/>
+          </Button>
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+          <Border x:Name="chip" CornerRadius="14" Background="{DynamicResource Surface2}" Padding="12,6" Margin="0,0,10,0">
+            <StackPanel Orientation="Horizontal">
+              <Ellipse x:Name="dot" Width="8" Height="8" Fill="{DynamicResource Dim}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <TextBlock x:Name="lblState" Text="Not connected" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Border>
+          <Button x:Name="btnTheme" Padding="10,6" ToolTip="Switch light / dark">
+            <TextBlock x:Name="themeIcon" Style="{StaticResource IconOnly}" Text="&#xE706;"/>
+          </Button>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <!-- ===== Content ===== -->
+    <Grid Grid.Row="1" Margin="12">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="5*" MinWidth="320"/>
+        <ColumnDefinition Width="12"/>
+        <ColumnDefinition Width="6*" MinWidth="420"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- Symbols -->
+      <Border Grid.Column="0" Style="{StaticResource Card}">
+        <DockPanel>
+          <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Grid>
+              <TextBox x:Name="tbSearch" Padding="32,0,8,0"/>
+              <TextBlock Style="{StaticResource IconOnly}" Text="&#xE721;" Foreground="{DynamicResource Dim}"
+                         HorizontalAlignment="Left" Margin="12,0,0,0" IsHitTestVisible="False"/>
+              <TextBlock x:Name="searchHint" Text="Search name or type, e.g.  motor speed   REAL   MAIN.*"
+                         Foreground="{DynamicResource Dim}" Margin="34,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+            </Grid>
+            <CheckBox x:Name="cbMembers" Grid.Column="1" Content="Members" IsChecked="True" Margin="14,0,2,0"
+                      ToolTip="Include struct / FB members and array elements"/>
+          </Grid>
+          <TextBlock x:Name="lblCount" DockPanel.Dock="Bottom" Style="{StaticResource Caption}" FontWeight="Normal" Margin="4,8,0,0"/>
+          <ListView x:Name="lvSym" SelectionMode="Single">
+            <ListView.View>
+              <GridView>
+                <GridViewColumn Header="Name" Width="330" DisplayMemberBinding="{Binding Name}"/>
+                <GridViewColumn Header="Type" Width="150" DisplayMemberBinding="{Binding Type}"/>
+                <GridViewColumn Header="Size" Width="56" DisplayMemberBinding="{Binding Size}"/>
+              </GridView>
+            </ListView.View>
+          </ListView>
+        </DockPanel>
+      </Border>
+
+      <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="Transparent"/>
+
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="3*" MinHeight="380"/>
+          <RowDefinition Height="12"/>
+          <RowDefinition Height="2*" MinHeight="150"/>
+        </Grid.RowDefinitions>
+
+        <!-- Variable -->
+        <Border Grid.Row="0" Style="{StaticResource Card}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBox x:Name="tbName" FontFamily="Cascadia Mono, Consolas" ToolTip="Any path works, e.g. MAIN.aData[7].rValue (Enter reads it)"/>
+              <Button x:Name="btnRead" Grid.Column="1" Margin="8,0,0,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Style="{StaticResource Icon}" Text="&#xE896;"/>
+                  <TextBlock Text="Read" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="btnWatch" Grid.Column="2" Margin="8,0,0,0" ToolTip="Add to watch list">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Style="{StaticResource Icon}" Text="&#xE710;"/>
+                  <TextBlock Text="Watch" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="2,16,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="VALUE" Style="{StaticResource Caption}"/>
+                <TextBlock x:Name="lblValue" Text="-" FontFamily="Cascadia Mono, Consolas" FontSize="28"
+                           TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+              </StackPanel>
+              <CheckBox x:Name="cbLive" Grid.Column="1" Content="Live" VerticalAlignment="Bottom" Margin="0,0,0,6"
+                        ToolTip="Read every 100 ms and chart the last 10 s"/>
+            </Grid>
+
+            <WrapPanel Grid.Row="2" Margin="0,10,0,0">
+              <Border x:Name="pillType" Style="{StaticResource Pill}" Visibility="Collapsed">
+                <TextBlock x:Name="lblType" FontSize="12"/>
+              </Border>
+              <Border x:Name="pillAddr" Style="{StaticResource Pill}" Visibility="Collapsed">
+                <TextBlock x:Name="lblAddr" FontSize="12" Foreground="{DynamicResource Dim}"/>
+              </Border>
+              <Border x:Name="pillComment" Style="{StaticResource Pill}" Visibility="Collapsed">
+                <TextBlock x:Name="lblComment" FontSize="12" Foreground="{DynamicResource Comment}"
+                           TextTrimming="CharacterEllipsis" MaxWidth="520"/>
+              </Border>
+            </WrapPanel>
+
+            <Border x:Name="chartHost" Grid.Row="3" Margin="0,4,0,12" CornerRadius="8"
+                    Background="{DynamicResource Surface2}" MinHeight="120" Padding="4"/>
+
+            <Grid Grid.Row="4">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBox x:Name="tbNew" FontFamily="Cascadia Mono, Consolas"
+                       ToolTip="TRUE, 42, 16#FF, 1.5, T#2s, 'text', E_State.Run, hex:01 02 (Enter writes)"/>
+              <Button x:Name="btnWrite" Grid.Column="1" Style="{StaticResource AccentButton}" Margin="8,0,0,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Style="{StaticResource Icon}" Text="&#xE898;"/>
+                  <TextBlock Text="Write" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <CheckBox x:Name="cbConfirm" Grid.Column="2" Content="Confirm" IsChecked="True" Margin="14,0,0,0"
+                        ToolTip="Ask before writing"/>
+            </Grid>
+            <TextBlock Grid.Row="5" Style="{StaticResource Caption}" FontWeight="Normal" Margin="2,8,0,0"
+                       Text="Values: TRUE, 42, 16#FF, 1.5, T#2s, 'text', E_State.Run, hex:01 02"/>
+          </Grid>
+        </Border>
+
+        <GridSplitter Grid.Row="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="Transparent"/>
+
+        <!-- Watch list -->
+        <Border Grid.Row="2" Style="{StaticResource Card}">
+          <DockPanel>
+            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+              <TextBlock Text="Watch list" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center"/>
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <CheckBox x:Name="cbWatchLive" Content="Live" Margin="0,0,14,0" ToolTip="Refresh every 500 ms"/>
+                <Button x:Name="btnRemove" Padding="10,4" ToolTip="Remove selected">
+                  <TextBlock Style="{StaticResource IconOnly}" Text="&#xE74D;"/>
+                </Button>
+                <Button x:Name="btnClear" Content="Clear" Margin="6,0,0,0" Padding="12,4"/>
+              </StackPanel>
+            </DockPanel>
+            <ListView x:Name="lvWatch" SelectionMode="Extended" ItemContainerStyle="{StaticResource WatchItemStyle}">
+              <ListView.View>
+                <GridView>
+                  <GridViewColumn Header="Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
+                  <GridViewColumn Header="Value" Width="200" DisplayMemberBinding="{Binding Value}"/>
+                  <GridViewColumn Header="Type" Width="120" DisplayMemberBinding="{Binding Type}"/>
+                </GridView>
+              </ListView.View>
+            </ListView>
+          </DockPanel>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <!-- ===== Status ===== -->
+    <Border Grid.Row="2" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Border}"
+            BorderThickness="0,1,0,0" Padding="16,6">
+      <TextBlock x:Name="lblStatus" Foreground="{DynamicResource Dim}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+    </Border>
+  </Grid>
+</Window>
+'@
+
 function Start-Gui {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    if (-not ('AdsMini.Spark' -as [type])) {
-        $refs = @('System.Drawing')
-        if ($PSVersionTable.PSEdition -eq 'Core') { $refs = @('System.Drawing.Common', 'System.Drawing.Primitives', 'System.Collections', 'System.Runtime', 'System.Runtime.Extensions', 'System.Runtime.InteropServices', 'System.Globalization', 'netstandard') } # PowerShell 7
-        Add-Type -TypeDefinition $uiSource -ReferencedAssemblies $refs -Language CSharp
+    if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+        throw 'The GUI needs an STA thread. Start it with: powershell.exe -STA -File AdsTool.ps1 (AdsTool.bat does this).'
     }
-    [System.Windows.Forms.Application]::EnableVisualStyles()
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
+    if (-not ('AdsMini.SparkView' -as [type])) {
+        $refs = @([System.Windows.FrameworkElement].Assembly.Location, [System.Windows.Media.Visual].Assembly.Location,
+                  [System.Windows.DependencyObject].Assembly.Location, [System.Xaml.XamlReader].Assembly.Location)
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            $refs += @('System.Runtime', 'System.Collections', 'System.Runtime.InteropServices', 'System.ObjectModel', 'netstandard')
+        }
+        else { $refs += @([System.Diagnostics.Stopwatch].Assembly.Location) }
+        Add-Type -TypeDefinition $uiSource -ReferencedAssemblies $refs -Language CSharp -IgnoreWarnings
+    }
 
     $dll = [AdsMini.AdsClient]::LoadDll($AdsDll)
 
@@ -1484,359 +2189,123 @@ function Start-Gui {
         catch { }
     }
 
+    $window = [System.Windows.Markup.XamlReader]::Parse($xaml)
+    foreach ($m in [regex]::Matches($xaml, 'x:Name="(\w+)"')) {
+        $el = $window.FindName($m.Groups[1].Value)
+        if ($el) { Set-Variable -Name $m.Groups[1].Value -Value $el }
+    }
+
+    $spark = New-Object AdsMini.SparkView
+    $spark.EmptyText = 'Turn on Live to chart the last 10 s of a number or BOOL'
+    $chartHost.Child = $spark
+
     # Shared mutable state lives in a hashtable so event handlers can change it.
     $S = @{
         Client    = (New-AdsClient)
         Results   = (New-Object 'System.Collections.Generic.List[AdsMini.SymbolInfo]')
+        Watch     = (New-Object 'System.Collections.ObjectModel.ObservableCollection[AdsMini.WatchItem]')
         Busy      = $false
         LocalId   = $null
-        Spark     = (New-Object AdsMini.Spark)
         ChartName = ''
         Tick      = 0
         Dark      = $startDark
-        Pal       = $null
+        Hwnd      = [IntPtr]::Zero
+        Loading   = $false
+        SelBefore = -1
+    }
+    $lvWatch.ItemsSource = $S.Watch
+
+    $Palettes = @{
+        Dark  = @{ Bg = '#16171B'; Surface = '#1F2026'; Surface2 = '#2A2B33'; Hover = '#33343D'; Border = '#30313A'
+                   Text = '#E7E8EC'; Dim = '#9A9CA8'; Accent = '#4F8CFF'; AccentText = '#FFFFFF'; Select = '#2D4A80'
+                   SelectText = '#FFFFFF'; Error = '#FF7A7A'; Ok = '#4ADE80'; Warn = '#FBBF24'; Comment = '#86C48A'
+                   Overlay = '#14FFFFFF'; TipBg = '#E7E8EC'; TipFg = '#16171B' }
+        Light = @{ Bg = '#F3F4F7'; Surface = '#FFFFFF'; Surface2 = '#F1F2F5'; Hover = '#E9EAF0'; Border = '#E0E2E8'
+                   Text = '#1D1F24'; Dim = '#6B6F7B'; Accent = '#2563EB'; AccentText = '#FFFFFF'; Select = '#DCE7FF'
+                   SelectText = '#10203F'; Error = '#C62828'; Ok = '#16A34A'; Warn = '#D97706'; Comment = '#2E7D32'
+                   Overlay = '#0D000000'; TipBg = '#1D1F24'; TipFg = '#FFFFFF' }
     }
 
-    function C($hex) { [System.Drawing.ColorTranslator]::FromHtml($hex) }
-    function Get-Palette($dark) {
-        if ($dark) {
-            return @{ Back = (C '#1F1F1F'); Input = (C '#2A2A2A'); Header = (C '#2D2D2D'); Button = (C '#333333'); Hover = (C '#3E3E3E')
-                      Border = (C '#454545'); Text = (C '#E4E4E4'); Dim = (C '#9D9D9D'); Grid = (C '#3A3A3A'); Accent = (C '#4CA6FF')
-                      Select = (C '#264F78'); SelectText = (C '#FFFFFF')
-                      Comment = (C '#7FB96A'); Error = (C '#F28B82') }
-        }
-        return @{ Back = [System.Drawing.SystemColors]::Control; Input = [System.Drawing.SystemColors]::Window; Header = (C '#F3F3F3')
-                  Button = [System.Drawing.SystemColors]::Control; Hover = (C '#E5F1FB'); Border = (C '#C8C8C8')
-                  Text = [System.Drawing.SystemColors]::ControlText; Dim = (C '#6E6E6E'); Grid = (C '#E3E3E3'); Accent = (C '#0067C0')
-                  Select = [System.Drawing.SystemColors]::Highlight; SelectText = [System.Drawing.SystemColors]::HighlightText
-                  Comment = (C '#2E7D32'); Error = (C '#B3261E') }
-    }
-    $S.Pal = Get-Palette $startDark
-
-    $fontUi = New-Object System.Drawing.Font('Segoe UI', 9)
-    $fontSmall = New-Object System.Drawing.Font('Segoe UI', 8)
-    $fontMono = New-Object System.Drawing.Font('Consolas', 10)
-
-    function New-Pad($l, $t, $r, $b) { New-Object System.Windows.Forms.Padding($l, $t, $r, $b) }
-    function New-Label($text, $tag) {
-        $l = New-Object System.Windows.Forms.Label
-        $l.Text = $text; $l.AutoSize = $true; $l.Margin = (New-Pad 3 8 3 3); $l.Tag = $tag
-        return $l
-    }
-    function New-Button($text, $width) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text; $b.Width = $width; $b.Height = 28
-        return $b
-    }
-    function New-Check($text, $checked) {
-        $c = New-Object System.Windows.Forms.CheckBox
-        $c.Text = $text; $c.AutoSize = $true; $c.Checked = $checked; $c.Margin = (New-Pad 8 7 3 3)
-        return $c
-    }
-    function New-TextBox($mono) {
-        $t = New-Object System.Windows.Forms.TextBox
-        if ($mono) { $t.Font = $fontMono }
-        return $t
-    }
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Mini ADS Tool'
-    $form.Size = New-Object System.Drawing.Size(1200, 780)
-    $form.MinimumSize = New-Object System.Drawing.Size(900, 560)
-    $form.StartPosition = 'CenterScreen'
-    $form.Font = $fontUi
-
-    # --- connection bar -----------------------------------------------------
-    $top = New-Object System.Windows.Forms.FlowLayoutPanel
-    $top.Dock = 'Top'; $top.AutoSize = $true; $top.WrapContents = $false; $top.Padding = (New-Pad 6 6 6 4)
-    $cbNet = New-Object System.Windows.Forms.ComboBox
-    $cbNet.DropDownStyle = 'DropDown'   # pick a route or type a Net ID
-    $cbNet.Width = 330; $cbNet.DropDownWidth = 460; $cbNet.MaxDropDownItems = 20; $cbNet.Margin = (New-Pad 3 5 3 3)
-    $tbPort = New-TextBox $false; $tbPort.Width = 55; $tbPort.Text = [string]$Port; $tbPort.Margin = (New-Pad 3 5 3 3)
-    $btnConnect = New-Button 'Connect' 90
-    $btnDisconnect = New-Button 'Disconnect' 90; $btnDisconnect.Enabled = $false
-    $btnReload = New-Button 'Reload symbols' 115; $btnReload.Enabled = $false
-    $cbDark = New-Check 'Dark' $startDark
-    $lblState = New-Label 'Not connected'; $lblState.Margin = (New-Pad 14 8 3 3)
-    foreach ($ctl in @((New-Label 'AMS Net ID'), $cbNet, (New-Label 'Port'), $tbPort, $btnConnect, $btnDisconnect, $btnReload, $cbDark, $lblState)) {
-        [void]$top.Controls.Add($ctl)
-    }
-
-    # --- status line ----------------------------------------------------------
-    $status = New-Object System.Windows.Forms.Label
-    $status.Dock = 'Bottom'; $status.AutoSize = $false; $status.Height = 24; $status.TextAlign = 'MiddleLeft'
-    $status.Padding = (New-Pad 6 0 6 0); $status.AutoEllipsis = $true
-
-    function Set-Status($msg, [switch]$Err) {
-        $status.Text = (Get-Date -Format 'HH:mm:ss') + '   ' + $msg
-        $status.Tag = $(if ($Err) { 'error' } else { '' })
-        if ($Err) { $status.ForeColor = $S.Pal.Error } else { $status.ForeColor = $S.Pal.Text }
-    }
-
-    # --- list views: owner-drawn headers so they follow the theme ---------------
-    function New-ListView {
-        $lv = New-Object System.Windows.Forms.ListView
-        $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.HideSelection = $false; $lv.Dock = 'Fill'
-        $lv.BorderStyle = 'None'; $lv.OwnerDraw = $true
-        $lv.add_DrawColumnHeader({
-            param($sender, $e)
-            $P = $S.Pal
-            $g = $e.Graphics
-            $br = New-Object System.Drawing.SolidBrush($P.Header)
-            $g.FillRectangle($br, $e.Bounds)
-            $br.Dispose()
-            $pen = New-Object System.Drawing.Pen($P.Border)
-            $g.DrawLine($pen, $e.Bounds.Left, $e.Bounds.Bottom - 1, $e.Bounds.Right, $e.Bounds.Bottom - 1)
-            $g.DrawLine($pen, $e.Bounds.Right - 1, $e.Bounds.Top + 4, $e.Bounds.Right - 1, $e.Bounds.Bottom - 5)
-            $pen.Dispose()
-            $r = New-Object System.Drawing.Rectangle(($e.Bounds.X + 6), $e.Bounds.Y, ($e.Bounds.Width - 10), $e.Bounds.Height)
-            [System.Windows.Forms.TextRenderer]::DrawText($g, $e.Header.Text, $sender.Font, $r, $P.Dim,
-                [System.Windows.Forms.TextFormatFlags]'VerticalCenter, Left, EndEllipsis, SingleLine')
-        })
-        # Rows are drawn here (not by Windows) so selected text follows the theme.
-        $lv.add_DrawItem({ param($sender, $e) })   # cells are drawn in DrawSubItem
-        $lv.add_DrawSubItem({
-            param($sender, $e)
-            $P = $S.Pal
-            $sel = $sender.SelectedIndices.Contains($e.ItemIndex)
-            if ($sel) { $bg = $P.Select; $fg = $P.SelectText } else { $bg = $sender.BackColor; $fg = $e.Item.ForeColor }
-            $b = $e.Bounds
-            if ($e.ColumnIndex -eq 0) { $b = New-Object System.Drawing.Rectangle($b.X, $b.Y, $sender.Columns[0].Width, $b.Height) }
-            $br = New-Object System.Drawing.SolidBrush($bg)
-            $e.Graphics.FillRectangle($br, $b)
-            $br.Dispose()
-            $r = New-Object System.Drawing.Rectangle(($b.X + 4), $b.Y, ($b.Width - 6), $b.Height)
-            [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $e.SubItem.Text, $sender.Font, $r, $fg,
-                [System.Windows.Forms.TextFormatFlags]'VerticalCenter, Left, EndEllipsis, SingleLine, NoPrefix')
-        })
-        # Owner-drawn list views only repaint part of a row on hover; repaint the whole row.
-        $lv.add_MouseMove({
-            param($sender, $e)
-            $it = $sender.GetItemAt($e.X, $e.Y)
-            if ($it) { $sender.Invalidate($it.Bounds) }
-        })
-        return $lv
-    }
-    # Stretch one column so the columns exactly fill the width (no unthemed strip on the right).
-    function Fit-Column($lv, $stretch) {
-        $sum = 0
-        for ($i = 0; $i -lt $lv.Columns.Count; $i++) { if ($i -ne $stretch) { $sum += $lv.Columns[$i].Width } }
-        $w = $lv.ClientSize.Width - $sum - 1
-        if ($w -lt 80) { $w = 80 }
-        if ($lv.Columns[$stretch].Width -ne $w) { $lv.Columns[$stretch].Width = $w }
-    }
-
-    # --- left: search ---------------------------------------------------------
-    $split = New-Object System.Windows.Forms.SplitContainer
-    $split.Dock = 'Fill'; $split.SplitterWidth = 5
-
-    $searchBar = New-Object System.Windows.Forms.FlowLayoutPanel
-    $searchBar.Dock = 'Top'; $searchBar.AutoSize = $true; $searchBar.WrapContents = $false
-    $tbSearch = New-TextBox $false; $tbSearch.Width = 260; $tbSearch.Margin = (New-Pad 3 5 3 5)
-    $cbMembers = New-Check 'Struct / FB members' $true
-    $lblCount = New-Label '' 'dim'
-    foreach ($ctl in @((New-Label 'Search'), $tbSearch, $cbMembers, $lblCount)) { [void]$searchBar.Controls.Add($ctl) }
-
-    $lvSym = New-ListView
-    $lvSym.MultiSelect = $false; $lvSym.VirtualMode = $true
-    [void]$lvSym.Columns.Add('Name', 360)
-    [void]$lvSym.Columns.Add('Type', 170)
-    [void]$lvSym.Columns.Add('Size', 55)
-
-    $split.Panel1.Controls.Add($lvSym)
-    $split.Panel1.Controls.Add($searchBar)
-    $lvSym.BringToFront()
-
-    # --- right top: variable details (grid layout, scales with DPI) -----------
-    $split2 = New-Object System.Windows.Forms.SplitContainer
-    $split2.Dock = 'Fill'; $split2.Orientation = 'Horizontal'; $split2.SplitterWidth = 5
-    $split.Panel2.Controls.Add($split2)
-
-    $grid = New-Object System.Windows.Forms.TableLayoutPanel
-    $grid.Dock = 'Fill'; $grid.ColumnCount = 3; $grid.Padding = (New-Pad 8 6 8 6)
-    [void]$grid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
-    [void]$grid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
-    [void]$grid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
-
-    $lblVar = New-Label 'Variable'; $lblVar.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    $tbName = New-TextBox $false
-    $btnRead = New-Button 'Read' 110
-    $lblType = New-Label ''
-    $lblAddr = New-Label '' 'dim'
-    $lblComment = New-Label '' 'comment'; $lblComment.AutoEllipsis = $true
-    $tbValue = New-TextBox $true; $tbValue.ReadOnly = $true
-    $cbLive = New-Check 'Live + chart' $false; $cbLive.Anchor = 'Left'
-    $tbNew = New-TextBox $true
-    $btnWrite = New-Button 'Write' 110
-    $cbConfirm = New-Check 'Ask before writing' $true; $cbConfirm.Margin = (New-Pad 0 6 3 3)
-    $btnWatch = New-Button 'Add to watch' 110
-    $chart = New-Object System.Windows.Forms.PictureBox   # double-buffered, painted by AdsMini.Spark
-    $chart.Dock = 'Fill'; $chart.MinimumSize = New-Object System.Drawing.Size(100, 110); $chart.Margin = (New-Pad 3 8 3 3)
-    $lblTip = New-Label 'Any path works, e.g. MAIN.aData[7].rValue.   Values: TRUE, 42, 16#FF, 1.5, T#2s, ''text'', E_State.Run, hex:01 02' 'dim'
-    $lblTip.AutoEllipsis = $true
-
-    $AnchorLR = [System.Windows.Forms.AnchorStyles]'Left, Right'
-    function Add-Cell($ctl, $col, $row, $span) {
-        $grid.Controls.Add($ctl, $col, $row)
-        if ($span -gt 1) { $grid.SetColumnSpan($ctl, $span) }
-    }
-    function Add-Row($label, $ctl, $extra) {
-        $row = $grid.RowCount
-        $grid.RowCount = $row + 1
-        [void]$grid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-        if ($label) {
-            $l = New-Label $label
-            $l.Anchor = 'Left'; $l.Margin = (New-Pad 3 3 10 3)
-            Add-Cell $l 0 $row 1
-        }
-        if ($ctl) {
-            if ($ctl -is [System.Windows.Forms.TextBox] -or $ctl -is [System.Windows.Forms.Label]) { $ctl.Anchor = $AnchorLR }
-            if ($ctl -is [System.Windows.Forms.Label]) { $ctl.AutoSize = $false; $ctl.Height = 22; $ctl.TextAlign = 'MiddleLeft' }
-            if ($ctl -is [System.Windows.Forms.TextBox]) { $ctl.Margin = (New-Pad 3 4 3 4) }
-            Add-Cell $ctl 1 $row $(if ($extra) { 1 } else { 2 })
-        }
-        if ($extra) { Add-Cell $extra 2 $row 1 }
-    }
-    $grid.RowCount = 0
-    Add-Row $null $lblVar $null
-    Add-Row 'Name' $tbName $btnRead
-    Add-Row 'Type' $lblType $null
-    Add-Row 'Address' $lblAddr $null
-    Add-Row 'Comment' $lblComment $null
-    Add-Row 'Value' $tbValue $cbLive
-    Add-Row 'New value' $tbNew $btnWrite
-    Add-Row $null $cbConfirm $btnWatch
-    $chartRow = $grid.RowCount
-    $grid.RowCount = $chartRow + 2
-    [void]$grid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
-    [void]$grid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
-    Add-Cell $chart 0 $chartRow 3
-    $lblTip.AutoSize = $false; $lblTip.Height = 22; $lblTip.Anchor = $AnchorLR
-    Add-Cell $lblTip 0 ($chartRow + 1) 3
-    $split2.Panel1.Controls.Add($grid)
-
-    # --- right bottom: watch list ----------------------------------------------
-    $watchBar = New-Object System.Windows.Forms.FlowLayoutPanel
-    $watchBar.Dock = 'Top'; $watchBar.AutoSize = $true; $watchBar.WrapContents = $false; $watchBar.Padding = (New-Pad 6 2 6 2)
-    $cbWatchLive = New-Check 'Live update (500 ms)' $false
-    $btnRemove = New-Button 'Remove' 80
-    $btnClear = New-Button 'Clear' 80
-    $lblWatch = New-Label 'Watch list'; $lblWatch.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    foreach ($ctl in @($lblWatch, $cbWatchLive, $btnRemove, $btnClear)) { [void]$watchBar.Controls.Add($ctl) }
-
-    $lvWatch = New-ListView
-    [void]$lvWatch.Columns.Add('Name', 280)
-    [void]$lvWatch.Columns.Add('Value', 180)
-    [void]$lvWatch.Columns.Add('Type', 110)
-    $split2.Panel2.Controls.Add($lvWatch)
-    $split2.Panel2.Controls.Add($watchBar)
-    $lvWatch.BringToFront()
-
-    $form.Controls.Add($split)
-    $form.Controls.Add($top)
-    $form.Controls.Add($status)
-    $split.BringToFront()
-
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 100
-    $searchTimer = New-Object System.Windows.Forms.Timer
-    $searchTimer.Interval = 250
-
-    # --- theme ------------------------------------------------------------------
-    function Set-ThemeOn($c) {
-        $P = $S.Pal
-        if ($c -is [System.Windows.Forms.TextBox] -or $c -is [System.Windows.Forms.ComboBox] -or $c -is [System.Windows.Forms.ListView]) {
-            $c.BackColor = $P.Input; $c.ForeColor = $P.Text
-            if ($c -is [System.Windows.Forms.TextBox]) { $c.BorderStyle = $(if ($S.Dark) { 'FixedSingle' } else { 'Fixed3D' }) }
-            if ($c -is [System.Windows.Forms.ComboBox]) { $c.FlatStyle = $(if ($S.Dark) { 'Flat' } else { 'Standard' }) }
-        }
-        elseif ($c -is [System.Windows.Forms.Button]) {
-            $c.ForeColor = $P.Text
-            if ($S.Dark) {
-                $c.FlatStyle = 'Flat'; $c.BackColor = $P.Button
-                $c.FlatAppearance.BorderColor = $P.Border; $c.FlatAppearance.MouseOverBackColor = $P.Hover
-            }
-            else { $c.FlatStyle = 'Standard'; $c.BackColor = $P.Button; $c.UseVisualStyleBackColor = $true }
-        }
-        elseif ($c -is [System.Windows.Forms.PictureBox]) { $c.BackColor = $P.Input }
-        else {
-            $c.BackColor = $P.Back
-            switch ("$($c.Tag)") {
-                'dim' { $c.ForeColor = $P.Dim }
-                'comment' { $c.ForeColor = $P.Comment }
-                'error' { $c.ForeColor = $P.Error }
-                default { $c.ForeColor = $P.Text }
-            }
-        }
-        foreach ($child in $c.Controls) { Set-ThemeOn $child }
-    }
+    function Get-Color($hex) { [System.Windows.Media.Color][System.Windows.Media.ColorConverter]::ConvertFromString($hex) }
 
     function Set-Theme($dark) {
         $S.Dark = $dark
-        $S.Pal = Get-Palette $dark
-        $form.SuspendLayout()
-        Set-ThemeOn $form
-        $split.BackColor = $S.Pal.Border; $split2.BackColor = $S.Pal.Border   # splitter bars
-        $split.Panel1.BackColor = $S.Pal.Back; $split.Panel2.BackColor = $S.Pal.Back
-        $split2.Panel1.BackColor = $S.Pal.Back; $split2.Panel2.BackColor = $S.Pal.Back
-        $form.ResumeLayout()
-        [AdsMini.Win]::DarkTitleBar($form.Handle, $dark)
-        foreach ($lv in @($lvSym, $lvWatch)) { [AdsMini.Win]::Theme($lv.Handle, $(if ($dark) { 'DarkMode_Explorer' } else { 'Explorer' })) }
-        [AdsMini.Win]::Theme($cbNet.Handle, $(if ($dark) { 'DarkMode_CFD' } else { $null }))
-        foreach ($it in $lvWatch.Items) { if ("$($it.Tag)" -ne 'error') { $it.ForeColor = $S.Pal.Text } else { $it.ForeColor = $S.Pal.Error } }
-        $form.Refresh()
+        $p = $Palettes[$(if ($dark) { 'Dark' } else { 'Light' })]
+        foreach ($k in $p.Keys) {
+            $b = New-Object System.Windows.Media.SolidColorBrush (Get-Color $p[$k])
+            $b.Freeze()
+            # set_Item, not [$k] = : PowerShell's indexer stores a PSObject wrapper
+            # round the brush, which WPF rejects when a DynamicResource wants a Brush.
+            $window.Resources.set_Item($k, $b)
+        }
+        $spark.SetColors((Get-Color $p.Accent), (Get-Color $p.Border), (Get-Color $p.Dim), (Get-Color $p.TipBg), (Get-Color $p.TipFg))
+        if ($dark) { $themeIcon.Text = [string][char]0xE706 } else { $themeIcon.Text = [string][char]0xE708 }   # sun / moon
+        if ($S.Hwnd -ne [IntPtr]::Zero) { [AdsMini.Win]::DarkTitleBar($S.Hwnd, $dark) }
     }
 
-    # --- behaviour ------------------------------------------------------------
+    function Set-Status($msg, [switch]$Err) {
+        $lblStatus.Text = (Get-Date -Format 'HH:mm:ss') + '    ' + $msg
+        $lblStatus.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, $(if ($Err) { 'Error' } else { 'Dim' }))
+    }
+
+    # Lets WPF repaint before a long blocking call (e.g. the symbol upload).
+    function Update-UiNow {
+        $window.Dispatcher.Invoke([action] { }, [System.Windows.Threading.DispatcherPriority]::Background)
+    }
+
+    function Set-StateChip($text, $brushKey) {
+        $lblState.Text = $text
+        $dot.SetResourceReference([System.Windows.Shapes.Shape]::FillProperty, $brushKey)
+    }
+
     function Set-Connected($on) {
-        $btnDisconnect.Enabled = $on
-        $btnReload.Enabled = $on
+        $btnDisconnect.IsEnabled = $on
+        $btnReload.IsEnabled = $on
     }
 
     # Refills the Net ID dropdown, keeping whatever is typed in the box.
     function Update-RouteList {
-        $keep = $cbNet.Text
-        if ($null -eq $S.LocalId) {
-            $S.LocalId = ''
-            try { $S.LocalId = [AdsMini.AdsClient]::LocalNetId() } catch { }
+        $S.Loading = $true
+        try {
+            $keep = $cbNet.Text
+            if ($null -eq $S.LocalId) {
+                $S.LocalId = ''
+                try { $S.LocalId = [AdsMini.AdsClient]::LocalNetId() } catch { }
+            }
+            $routes = Get-AdsRoutes
+            $cbNet.Items.Clear()
+            [void]$cbNet.Items.Add(('Local (this PC)   ' + $S.LocalId).Trim())
+            foreach ($r in $routes) { [void]$cbNet.Items.Add((Format-Route $r)) }
+            $cbNet.Text = $keep
+            return @($routes).Count
         }
-        $routes = Get-AdsRoutes
-        $cbNet.BeginUpdate()
-        $cbNet.Items.Clear()
-        [void]$cbNet.Items.Add(('Local (this PC)   ' + $S.LocalId).Trim())
-        foreach ($r in $routes) { [void]$cbNet.Items.Add((Format-Route $r)) }
-        $cbNet.EndUpdate()
-        $cbNet.Text = $keep
-        return @($routes).Count
+        finally { $S.Loading = $false }
     }
 
     function Update-State {
         try {
             $dev = ''
             try { $dev = '   ' + $S.Client.DeviceInfo() } catch { }
-            $lblState.Text = '{0}   {1}{2}' -f $S.Client.Target, $S.Client.ReadState(), $dev
+            $st = $S.Client.ReadState()
+            $key = 'Warn'
+            if ($st -eq 'Run') { $key = 'Ok' }
+            Set-StateChip ('{0}   {1}{2}' -f $S.Client.Target, $st, $dev) $key
         }
-        catch { $lblState.Text = $S.Client.Target + '   ' + (Get-ErrMsg $_) }
+        catch { Set-StateChip ($S.Client.Target + '   ' + (Get-ErrMsg $_)) 'Error' }
     }
 
     function Update-Search {
-        $lvSym.SelectedIndices.Clear()
-        $S.Results = $S.Client.Search($tbSearch.Text, $cbMembers.Checked)
-        # Going to 0 first and scrolling back to the top stops a virtual list keeping its old
-        # scroll position, which showed as blank rows above the first symbol.
-        $lvSym.VirtualListSize = 0
-        $lvSym.VirtualListSize = $S.Results.Count
-        if ($S.Results.Count -gt 0) { $lvSym.EnsureVisible(0) }
-        $lvSym.Invalidate()
-        $lblCount.Text = '{0:N0} of {1:N0}' -f $S.Results.Count, $S.Client.Symbols.Count
-        Fit-Column $lvSym 0
+        $S.Results = $S.Client.Search($tbSearch.Text, [bool]$cbMembers.IsChecked)
+        $lvSym.ItemsSource = $S.Results
+        if ($S.Results.Count -gt 0) { $lvSym.ScrollIntoView($S.Results[0]) }
+        $lblCount.Text = '{0:N0} of {1:N0} symbols' -f $S.Results.Count, $S.Client.Symbols.Count
     }
 
     function Update-Symbols {
-        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $window.Cursor = [System.Windows.Input.Cursors]::Wait
         try {
             Set-Status 'Uploading symbols...'
-            [System.Windows.Forms.Application]::DoEvents()
+            Update-UiNow
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $n = $S.Client.LoadSymbols()
             $msg = 'Loaded {0:N0} entries ({1:N0} symbols, {2:N0} types) in {3} ms' -f $n, $S.Client.TopLevelCount, $S.Client.TypeCount, $sw.ElapsedMilliseconds
@@ -1844,25 +2313,51 @@ function Start-Gui {
             Set-Status $msg
             Update-Search
         }
-        finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+        finally { $window.Cursor = $null }
+    }
+
+    function Connect-Target {
+        $window.Cursor = [System.Windows.Input.Cursors]::Wait
+        try {
+            $p = 0
+            if (-not [int]::TryParse($tbPort.Text.Trim(), [ref]$p)) { throw 'Port must be a number (TC3 PLC = 851, TC2 PLC = 801)' }
+            $cbLive.IsChecked = $false
+            Set-Status 'Connecting...'
+            Update-UiNow
+            $S.Client.Connect((Resolve-NetIdText $cbNet.Text), $p, $TimeoutMs)
+            Set-Connected $true
+            Update-State
+            Update-Symbols
+            [void]$tbSearch.Focus()
+        }
+        catch {
+            $S.Client.Disconnect()
+            Set-Connected $false
+            Set-StateChip 'Not connected' 'Dim'
+            Set-Status (Get-ErrMsg $_) -Err
+            [void][System.Windows.MessageBox]::Show($window, (Get-ErrMsg $_), 'Connect failed', 'OK', 'Error')
+        }
+        finally { $window.Cursor = $null }
     }
 
     function Show-Read($r) {
         $i = $r.Info
-        $lblType.Text = '{0}   ({1} bytes)' -f $i.Type, $i.Size
+        $lblType.Text = '{0}   {1} bytes' -f $i.Type, $i.Size
         $lblAddr.Text = $i.Address
         $lblComment.Text = ($i.Comment -replace '\s+', ' ')
-        if ($tbValue.Text -ne $r.Value) { $tbValue.Text = $r.Value }
+        $pillType.Visibility = 'Visible'
+        $pillAddr.Visibility = 'Visible'
+        $pillComment.Visibility = $(if ($lblComment.Text) { 'Visible' } else { 'Collapsed' })
+        if ($lblValue.Text -ne $r.Value) { $lblValue.Text = $r.Value }
 
         # chart: restart when the variable changes, then add this sample if it's numeric
         if ($S.ChartName -ne $i.Name) {
-            $S.Spark.Clear()
+            $spark.Clear()
             $S.ChartName = $i.Name
-            $S.Spark.IsBool = $S.Client.IsBoolType($i)
+            $spark.IsBool = $S.Client.IsBoolType($i)
         }
         $v = $S.Client.NumericValue($i, $r.Raw)
-        if (-not [double]::IsNaN($v)) { $S.Spark.Add($v) }
-        $chart.Invalidate()
+        if (-not [double]::IsNaN($v)) { $spark.Add($v) }
     }
 
     function Read-Current([switch]$Quiet) {
@@ -1875,8 +2370,9 @@ function Start-Gui {
             if (-not $Quiet) { Set-Status ('Read {0} = {1}' -f $name, $r.Value) }
         }
         catch {
-            $tbValue.Text = ''
-            $cbLive.Checked = $false
+            $lblValue.Text = '-'
+            $cbLive.IsChecked = $false
+            $spark.Running = $false
             Set-Status (Get-ErrMsg $_) -Err
         }
     }
@@ -1886,9 +2382,9 @@ function Start-Gui {
         $val = $tbNew.Text
         if (-not $name) { return }
         if (-not $S.Client.Connected) { Set-Status 'Not connected' -Err; return }
-        if ($cbConfirm.Checked) {
-            $ans = [System.Windows.Forms.MessageBox]::Show("Write`n`n    $val`n`nto $name ?", 'Confirm write', 'YesNo', 'Question')
-            if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        if ($cbConfirm.IsChecked) {
+            $ans = [System.Windows.MessageBox]::Show($window, "Write`n`n    $val`n`nto $name ?", 'Confirm write', 'YesNo', 'Question')
+            if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return }
         }
         try {
             $r = $S.Client.WriteValue($name, $val)
@@ -1901,29 +2397,25 @@ function Start-Gui {
     function Add-Watch($name) {
         $name = ("$name").Trim()
         if (-not $name) { return }
-        foreach ($it in $lvWatch.Items) { if ($it.Text -eq $name) { return } }
-        $it = New-Object System.Windows.Forms.ListViewItem($name)
-        [void]$it.SubItems.Add('')
-        [void]$it.SubItems.Add('')
-        [void]$lvWatch.Items.Add($it)
+        foreach ($w in $S.Watch) { if ($w.Name -eq $name) { return } }
+        $S.Watch.Add((New-Object AdsMini.WatchItem($name)))
         Update-Watch
     }
 
     function Update-Watch {
         if (-not $S.Client.Connected) { return }
-        foreach ($it in $lvWatch.Items) {
+        foreach ($w in @($S.Watch)) {
             try {
-                $r = $S.Client.ReadValue($it.Text)
-                if ($it.SubItems[1].Text -ne $r.Value) { $it.SubItems[1].Text = $r.Value }
-                if ($it.SubItems[2].Text -ne $r.Info.Type) { $it.SubItems[2].Text = $r.Info.Type }
-                if ("$($it.Tag)" -eq 'error') { $it.Tag = ''; $it.ForeColor = $S.Pal.Text }
+                $r = $S.Client.ReadValue($w.Name)
+                $w.Value = $r.Value
+                $w.Type = $r.Info.Type
+                $w.IsError = $false
             }
             catch {
-                $it.SubItems[1].Text = Get-ErrMsg $_
-                $it.Tag = 'error'
-                $it.ForeColor = $S.Pal.Error
+                $w.Value = Get-ErrMsg $_
+                $w.IsError = $true
                 if ($script:FatalCodes -contains (Get-AdsCode $_)) {
-                    $cbWatchLive.Checked = $false
+                    $cbWatchLive.IsChecked = $false
                     Set-Status (Get-ErrMsg $_) -Err
                     break
                 }
@@ -1931,148 +2423,137 @@ function Start-Gui {
         }
     }
 
-    $btnConnect.add_Click({
-        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-        try {
-            $p = 0
-            if (-not [int]::TryParse($tbPort.Text.Trim(), [ref]$p)) { throw 'Port must be a number (TC3 PLC = 851, TC2 PLC = 801)' }
-            $cbLive.Checked = $false
-            $S.Client.Connect((Resolve-NetIdText $cbNet.Text), $p, $TimeoutMs)
-            Set-Connected $true
-            Update-State
-            Update-Symbols
-            [void]$tbSearch.Focus()
-        }
-        catch {
-            $S.Client.Disconnect()
-            Set-Connected $false
-            $lblState.Text = 'Not connected'
-            Set-Status (Get-ErrMsg $_) -Err
-            [void][System.Windows.Forms.MessageBox]::Show((Get-ErrMsg $_), 'Connect failed', 'OK', 'Error')
-        }
-        finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
-    })
+    # Keep the Name column filling the list width.
+    function Fit-NameColumn($lv, $index) {
+        $gv = $lv.View
+        $other = 0
+        for ($i = 0; $i -lt $gv.Columns.Count; $i++) { if ($i -ne $index) { $other += $gv.Columns[$i].ActualWidth } }
+        $w = $lv.ActualWidth - $other - 24
+        if ($w -gt 120) { $gv.Columns[$index].Width = $w }
+    }
 
-    # Re-read the routes each time the list opens, so ones added meanwhile show up.
-    $cbNet.add_DropDown({ [void](Update-RouteList) })
-    # Picking a target from the list connects straight away (typing still needs Connect / Enter).
-    $cbNet.add_SelectionChangeCommitted({
-        $form.BeginInvoke([System.Windows.Forms.MethodInvoker] { $btnConnect.PerformClick() }) | Out-Null
-    })
-    $cbNet.add_KeyDown({
-        param($sender, $e)
-        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; $btnConnect.PerformClick() }
-    })
+    # --- events -----------------------------------------------------------------
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(100)
+    $searchTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $searchTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 
-    $btnDisconnect.add_Click({
-        $cbLive.Checked = $false
-        $cbWatchLive.Checked = $false
+    $btnConnect.Add_Click({ Connect-Target })
+    $btnDisconnect.Add_Click({
+        $cbLive.IsChecked = $false
+        $spark.Running = $false
+        $cbWatchLive.IsChecked = $false
         $S.Client.Disconnect()
         $S.Client.Symbols.Clear()
         Update-Search
         Set-Connected $false
-        $lblState.Text = 'Not connected'
+        Set-StateChip 'Not connected' 'Dim'
         Set-Status 'Disconnected'
     })
+    $btnReload.Add_Click({ try { Update-State; Update-Symbols } catch { Set-Status (Get-ErrMsg $_) -Err } })
+    $btnTheme.Add_Click({ Set-Theme (-not $S.Dark) })
 
-    $btnReload.add_Click({
-        try { Update-State; Update-Symbols } catch { Set-Status (Get-ErrMsg $_) -Err }
+    # Picking a route from the list connects straight away; typing still needs Enter / Connect.
+    $cbNet.Add_DropDownOpened({
+        [void](Update-RouteList)
+        $S.SelBefore = $cbNet.SelectedIndex
     })
-
-    $cbDark.add_CheckedChanged({ Set-Theme $cbDark.Checked })
-
-    $tbSearch.add_TextChanged({ $searchTimer.Stop(); $searchTimer.Start() })
-    $searchTimer.add_Tick({ $searchTimer.Stop(); Update-Search })
-    $cbMembers.add_CheckedChanged({ Update-Search })
-
-    $lvSym.add_RetrieveVirtualItem({
+    $cbNet.Add_DropDownClosed({
+        if ($cbNet.SelectedIndex -ge 0 -and $cbNet.SelectedIndex -ne $S.SelBefore) {
+            [void]$window.Dispatcher.BeginInvoke([action] { Connect-Target })
+        }
+    })
+    $cbNet.Add_PreviewKeyDown({
         param($sender, $e)
-        $sym = $S.Results[$e.ItemIndex]
-        $item = New-Object System.Windows.Forms.ListViewItem($sym.Name)
-        [void]$item.SubItems.Add($sym.Type)
-        [void]$item.SubItems.Add([string]$sym.Size)
-        $e.Item = $item
+        if ($e.Key -eq [System.Windows.Input.Key]::Enter -and -not $cbNet.IsDropDownOpen) { $e.Handled = $true; Connect-Target }
     })
-    $lvSym.add_SelectedIndexChanged({
-        if ($lvSym.SelectedIndices.Count -gt 0) {
-            $sym = $S.Results[$lvSym.SelectedIndices[0]]
+    $tbPort.Add_KeyDown({
+        param($sender, $e)
+        if ($e.Key -eq [System.Windows.Input.Key]::Enter) { $e.Handled = $true; Connect-Target }
+    })
+
+    $tbSearch.Add_TextChanged({
+        $searchHint.Visibility = $(if ($tbSearch.Text) { 'Collapsed' } else { 'Visible' })
+        $searchTimer.Stop()
+        $searchTimer.Start()
+    })
+    $searchTimer.Add_Tick({ $searchTimer.Stop(); Update-Search })
+    $cbMembers.Add_Click({ Update-Search })
+
+    $lvSym.Add_SelectionChanged({
+        $sym = $lvSym.SelectedItem
+        if ($sym) {
             $tbName.Text = $sym.Name
             Read-Current
         }
     })
-    $lvSym.add_ItemActivate({
-        if ($lvSym.SelectedIndices.Count -gt 0) { Add-Watch $S.Results[$lvSym.SelectedIndices[0]].Name }
-    })
-    $lvSym.add_Resize({ Fit-Column $lvSym 0 })
-    $lvWatch.add_Resize({ Fit-Column $lvWatch 1 })
+    $lvSym.Add_MouseDoubleClick({ if ($lvSym.SelectedItem) { Add-Watch $lvSym.SelectedItem.Name } })
+    $lvSym.Add_SizeChanged({ Fit-NameColumn $lvSym 0 })
+    $lvWatch.Add_SizeChanged({ Fit-NameColumn $lvWatch 1 })
 
-    $tbName.add_KeyDown({
+    $tbName.Add_KeyDown({
         param($sender, $e)
-        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; Read-Current }
+        if ($e.Key -eq [System.Windows.Input.Key]::Enter) { $e.Handled = $true; Read-Current }
     })
-    $tbNew.add_KeyDown({
+    $tbNew.Add_KeyDown({
         param($sender, $e)
-        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; Write-Current }
+        if ($e.Key -eq [System.Windows.Input.Key]::Enter) { $e.Handled = $true; Write-Current }
     })
-    $btnRead.add_Click({ Read-Current })
-    $btnWrite.add_Click({ Write-Current })
-    $btnWatch.add_Click({ Add-Watch $tbName.Text })
-    $cbLive.add_CheckedChanged({ $chart.Invalidate() })
+    $btnRead.Add_Click({ Read-Current })
+    $btnWrite.Add_Click({ Write-Current })
+    $btnWatch.Add_Click({ Add-Watch $tbName.Text })
+    $cbLive.Add_Click({
+        $spark.Running = [bool]$cbLive.IsChecked
+        $spark.Refresh()
+    })
 
-    $chart.add_Paint({
-        param($sender, $e)
-        $P = $S.Pal
-        $S.Spark.Running = $cbLive.Checked
-        $S.Spark.Paint($e.Graphics, $chart.ClientSize.Width, $chart.ClientSize.Height, $fontSmall,
-            $P.Input, $P.Grid, $P.Accent, $P.Dim, 'Tick "Live + chart" to plot the last 10 s of a number or BOOL')
-    })
-    $chart.add_Resize({ $chart.Invalidate() })
-
-    $lvWatch.add_SelectedIndexChanged({
-        if ($lvWatch.SelectedItems.Count -gt 0) {
-            $tbName.Text = $lvWatch.SelectedItems[0].Text
+    $lvWatch.Add_SelectionChanged({
+        $w = $lvWatch.SelectedItem
+        if ($w) {
+            $tbName.Text = $w.Name
             Read-Current -Quiet
         }
     })
-    $btnRemove.add_Click({
-        $sel = @($lvWatch.SelectedItems)
-        foreach ($it in $sel) { $lvWatch.Items.Remove($it) }
+    $btnRemove.Add_Click({
+        foreach ($w in @($lvWatch.SelectedItems)) { [void]$S.Watch.Remove($w) }
     })
-    $btnClear.add_Click({ $lvWatch.Items.Clear() })
+    $btnClear.Add_Click({ $S.Watch.Clear() })
 
     # 100 ms tick: the Live variable (and chart) every tick, the watch list every 5th.
-    $timer.add_Tick({
+    $timer.Add_Tick({
         if ($S.Busy -or -not $S.Client.Connected) { return }
         $S.Busy = $true
         try {
             $S.Tick++
-            if ($cbLive.Checked) { Read-Current -Quiet }
-            if ($cbWatchLive.Checked -and ($S.Tick % 5 -eq 0)) { Update-Watch }
+            if ($cbLive.IsChecked) { Read-Current -Quiet }
+            if ($cbWatchLive.IsChecked -and ($S.Tick % 5 -eq 0)) { Update-Watch }
         }
         finally { $S.Busy = $false }
     })
 
-    $form.add_Shown({
-        $split.SplitterDistance = [Math]::Min(620, [int]($form.ClientSize.Width * 0.5))
-        $split2.SplitterDistance = [int]($split2.Height * 0.62)
-        Fit-Column $lvSym 0
-        Fit-Column $lvWatch 1
+    $window.Add_SourceInitialized({
+        $S.Hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+        [AdsMini.Win]::DarkTitleBar($S.Hwnd, $S.Dark)
+    })
+    $window.Add_Loaded({
+        $tbPort.Text = [string]$Port
         $n = Update-RouteList
+        $S.Loading = $true
         if ($NetId) { $cbNet.Text = $NetId } else { $cbNet.SelectedIndex = 0 }
+        $S.Loading = $false
+        Update-Search
         Set-Status ('Ready. {0} route(s) found. TcAdsDll: {1}' -f $n, $dll)
         [void]$btnConnect.Focus()
+        $timer.Start()
     })
-    $form.add_FormClosing({
+    $window.Add_Closing({
         $timer.Stop()
+        $searchTimer.Stop()
         $S.Client.Dispose()
     })
 
-    Set-Theme $startDark   # before showing, so there's no light flash
-    $timer.Start()
-    [void]$form.ShowDialog()
-    $timer.Dispose()
-    $searchTimer.Dispose()
-    $form.Dispose()
+    Set-Theme $startDark
+    [void]$window.ShowDialog()
 }
 
 # ---------------------------------------------------------------------------
