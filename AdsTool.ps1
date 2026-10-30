@@ -1664,7 +1664,7 @@ $xaml = @'
         </Setter.Value>
       </Setter>
     </Style>
-    <Style x:Key="Accent" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Background" Value="{DynamicResource Accent}"/>
       <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/>
       <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
@@ -1962,7 +1962,7 @@ $xaml = @'
                     ToolTip="Pick a route (connects straight away) or type an AMS Net ID and press Enter"/>
           <TextBlock Text="Port" Foreground="{DynamicResource Dim}" VerticalAlignment="Center" Margin="12,0,6,0"/>
           <TextBox x:Name="tbPort" Width="64" ToolTip="TC3 PLC = 851, TC2 PLC = 801"/>
-          <Button x:Name="btnConnect" Style="{StaticResource Accent}" Margin="12,0,0,0">
+          <Button x:Name="btnConnect" Style="{StaticResource AccentButton}" Margin="12,0,0,0">
             <StackPanel Orientation="Horizontal">
               <TextBlock Style="{StaticResource Icon}" Text="&#xE71B;"/>
               <TextBlock Text="Connect" VerticalAlignment="Center"/>
@@ -2111,7 +2111,7 @@ $xaml = @'
               </Grid.ColumnDefinitions>
               <TextBox x:Name="tbNew" FontFamily="Cascadia Mono, Consolas"
                        ToolTip="TRUE, 42, 16#FF, 1.5, T#2s, 'text', E_State.Run, hex:01 02 (Enter writes)"/>
-              <Button x:Name="btnWrite" Grid.Column="1" Style="{StaticResource Accent}" Margin="8,0,0,0">
+              <Button x:Name="btnWrite" Grid.Column="1" Style="{StaticResource AccentButton}" Margin="8,0,0,0">
                 <StackPanel Orientation="Horizontal">
                   <TextBlock Style="{StaticResource Icon}" Text="&#xE898;"/>
                   <TextBlock Text="Write" VerticalAlignment="Center"/>
